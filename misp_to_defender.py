@@ -1,3 +1,17 @@
+#!/usr/bin/env python3
+# SPDX-FileCopyrightText: 2024-2025 Jisc Services Limited
+# SPDX-FileContributor: Luke Hopkins
+# SPDX-License-Identifier: GPL-3.0-only
+
+__author__ = "Luke Hopkins"
+__copyright__ = "Copyright 2024-2025, Jisc Services Limited"
+__email__ = "Luke.Hopkins@jisc.ac.uk"
+__license__ = "GPL-3.0-only"
+__maintainer__ = "Luke Hopkins"
+__status__ = "Beta"
+__version__ = "0.0.1"
+
+
 from configparser import ConfigParser, NoSectionError, NoOptionError
 import requests
 import logging
