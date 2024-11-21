@@ -28,7 +28,7 @@ try:
 except ImportError:
     print("requests library is not installed, cannot run. Run: pip install requests")
     exit(1)
-    
+
 # Input file name for the script ini file.
 CONFIG_FILE = "misp_defender_config.ini"
 # Output file name for the script logging.
@@ -57,51 +57,54 @@ def GetIOCsFromMISP(pymisp_instance, tag, logger):
         "md5": "FileMd5",
         "sha256": "FileSha256",
     }
-    
+
     # Start the current page at 1
     c_page = 1
-    
+
     # Only retrieve 500 attributes per page
     PAGE_LIMIT = 500
-    while True:    
+    while True:
         try:
-            logger.info(f"Searching MISP attributes for tags: {tag} with limit={PAGE_LIMIT}. Current Page: {c_page}")
+            logger.info(
+                f"Searching MISP attributes for tags: {tag} with limit={PAGE_LIMIT}. Current Page: {c_page}")
             # Initiates a search on the pymisp instance for the tag(s). If multiple
             # tags are present, it will get all events that contain any of the
-            # indiviudal tags specified (OR operation). 
-            # Paginates the results into 500 attributes per page. 
+            # indiviudal tags specified (OR operation).
+            # Paginates the results into 500 attributes per page.
             results = pymisp_instance.search(controller="attributes",
-                    tags=tag,
-                    limit=PAGE_LIMIT,
-                    page=c_page)
+                                             tags=tag,
+                                             limit=PAGE_LIMIT,
+                                             page=c_page)
 
             attributes = results.get('Attribute', [])
-            
+
             # Exit the loop if there is no more attributes to grab
             if not attributes:
                 break
-            
+
             # Loop through each attribute found in the current batch
             for attr in attributes:
-                # Ensure that the IDS flag has been checked, and that the type is mapable to defender. 
+                # Ensure that the IDS flag has been checked, and that the type
+                # is mapable to defender.
                 if (
-                    attr["type"] in defender_map.keys()
-                    and attr["to_ids"]):
-                        # Stream the results back to the calling function
-                        yield {
-                            "indicatorType": defender_map[attr["type"]],
-                            "indicatorValue": attr.get("value"),
-                            "action": "Block",
-                            "title": f"IoC from MISP Event {attr['event_id']}",
-                            "description": f"IoC from MISP Event {attr['event_id']}",
-                        }
-                        
-            # Move to the next page of results.  
+                        attr["type"] in defender_map.keys()
+                        and attr["to_ids"]):
+                    # Stream the results back to the calling function
+                    yield {
+                        "indicatorType": defender_map[attr["type"]],
+                        "indicatorValue": attr.get("value"),
+                        "action": "Block",
+                        "title": f"IoC from MISP Event {attr['event_id']}",
+                        "description": f"IoC from MISP Event {attr['event_id']}",
+                    }
+
+            # Move to the next page of results.
             c_page += 1
-                        
+
         except Exception as e:
             logger.error("An error occurring when searching through MISP: {e}")
             break
+
 
 def GetMSAuthToken(tenant_id, client_id, client_secret, logger):
     # Requests an OAuth token needed for pushing IoCs into the Defender API.
@@ -126,44 +129,59 @@ def PushIOCsToDefender(auth_token, ioc_generator_obj, logger):
         "Authorization": f"Bearer {auth_token}",
         "Content-Type": "application/json",
     }
-    
+
     url = "https://api.securitycenter.microsoft.com/api/indicators/import"
-    
+
     total_iocs_pushed = 0
     batch = []
-    # Loops through the ioc generator object and pushes indicators into defender in batches of 500 (API has a limit of 500 indicators per request). 
+    # Loops through the ioc generator object and pushes indicators into
+    # defender in batches of 500 (API has a limit of 500 indicators per
+    # request).
     for i, ioc_obj in enumerate(ioc_generator_obj, start=1):
-        # Add IoC to current batch as we receive it from the ioc generator object
+        # Add IoC to current batch as we receive it from the ioc generator
+        # object
         batch.append(ioc_obj)
-    
-        # Check if the batch is ready to be sent off, and then fire it into defender. 
+
+        # Check if the batch is ready to be sent off, and then fire it into
+        # defender.
         if len(batch) == 500:
             try:
-                response = requests.post(url, headers=headers, data=json.dumps({"Indicators": batch}))
+                response = requests.post(
+                    url, headers=headers, data=json.dumps({"Indicators": batch}))
                 if response.status_code == 200:
-                    logger.info(f"Successfully pushed 500 Indicators to Defender in Batch:  {i // 500}")
+                    logger.info(
+                        f"Successfully pushed 500 Indicators to Defender in Batch:  {
+                            i // 500}")
                 else:
-                    logger.info(f"Error pushing batch {i // 500}: {response.text}")
+                    logger.info(
+                        f"Error pushing batch {
+                            i //
+                            500}: {
+                            response.text}")
             except Exception as e:
                 logger.info(f"Error pushing IOCs to  Defender {e}")
             # Keep track of how many IoCs have been pushed.
-            total_iocs_pushed+=500
-            # Clear the batch to make way to send the next 500. 
+            total_iocs_pushed += 500
+            # Clear the batch to make way to send the next 500.
             batch.clear()
-        
-    # Push remaining IoCs for the last batch that don't quite meet the len(batch) 500 limit. 
+
+    # Push remaining IoCs for the last batch that don't quite meet the
+    # len(batch) 500 limit.
     if batch:
         try:
-            response = requests.post(url, headers=headers, data=json.dumps({"Indicators": batch}))
+            response = requests.post(
+                url, headers=headers, data=json.dumps({"Indicators": batch}))
             if response.status_code == 200:
-                logger.info(f"Successfully pushed 500 Indicators to Defender in Batch: {i // 500}")
+                logger.info(
+                    f"Successfully pushed 500 Indicators to Defender in Batch: {
+                        i // 500}")
             else:
                 logger.info(f"Error pushing batch {i // 500}: {response.text}")
         except Exception as e:
             logger.info(f"Error pushing IOCs to Defender {e}")
 
-    total_iocs_pushed+=len(batch)
-        
+    total_iocs_pushed += len(batch)
+
     logger.info(f"Total IoCs Pushed Into Defender: {total_iocs_pushed}")
 
 
@@ -269,10 +287,10 @@ def Main():
 
     misp_conn = EstablishMISPConn(
         base_url, auth_key, verify_tls, logger=logger)
-        
+
     # Fetch IoCs from MISP in pages, then stream to Defender.
     ioc_generator_obj = GetIOCsFromMISP(misp_conn, tags, logger=logger)
-    
+
     # Pushes out all the extracted IoCs into the Defender instance.
     PushIOCsToDefender(oauth_token, ioc_generator_obj, logger=logger)
 
