@@ -1,7 +1,20 @@
+#!/usr/bin/env python3
+# SPDX-FileCopyrightText: 2024 Jisc Services Limited
+# SPDX-FileContributor: Luke Hopkins
+# SPDX-License-Identifier: GPL-3.0-only
+
+__author__ = "Luke Hopkins"
+__copyright__ = "Copyright 2024, Jisc Services Limited"
+__email__ = "Luke.Hopkins@jisc.ac.uk"
+__license__ = "GPL-3.0-only"
+__maintainer__ = "Luke Hopkins"
+__status__ = "Beta"
+__version__ = "0.0.1"
+
 from configparser import ConfigParser, NoSectionError, NoOptionError
-import requests
 import logging
 import os
+import json
 
 try:
     from pymisp import PyMISP
@@ -10,7 +23,12 @@ except (ImportError, ModuleNotFoundError):
     print("PyMISP is not installed, cannot run. Run: pip install pymisp")
     exit(1)
 
-
+try:
+    import requests
+except ImportError:
+    print("requests library is not installed, cannot run. Run: pip install requests")
+    exit(1)
+    
 # Input file name for the script ini file.
 CONFIG_FILE = "misp_defender_config.ini"
 # Output file name for the script logging.
@@ -28,6 +46,7 @@ def EstablishMISPConn(url, auth_key, verify_tls, logger):
 
 
 def GetIOCsFromMISP(pymisp_instance, tag, logger):
+
     # Maps MISP object types into Defender object types.
     defender_map = {
         "domain": "DomainName",
@@ -38,42 +57,51 @@ def GetIOCsFromMISP(pymisp_instance, tag, logger):
         "md5": "FileMd5",
         "sha256": "FileSha256",
     }
-    try:
-        logger.info(f"Searching MISP events for tags: {tag}")
-        # Initiates a search on the pymisp instance for the tag(s). If multiple
-        # tags are present, it will get all events that contain any of the
-        # indiviudal tags specified (OR operation).
-        results = pymisp_instance.search(tags=tag)
-        extracted_iocs = []
-        for event in results:
-            logger.info(
-                f"Found MISP Event: {
-                    event.get(
-                        'Event',
-                        {}).get("id")}")
-            attributes = event.get("Event", {}).get("Attribute", [])
-            for attr in attributes:
-                # Checks that the MISP attribute can be mapped to a Defender
-                # object type and that the IDS flag is set.
-                if (
-                    attr.get("type") in defender_map.keys()
-                    and attr.get("to_ids")
-                ):
-                    extracted_iocs.append(
-                        {
-                            "indicatorType": defender_map[attr.get("type")],
-                            "indicatorValue": attr.get("value"),
-                            # All indicators are set to block by default.
-                            "action": "Block",
-                            "title": f"IoC from MISP Event {event.get('Event', {}).get("id")}",
-                            "description": f"IoC from MISP Event {event.get('Event', {}).get("id")}",
-                        }
-                    )
-        return extracted_iocs
-    except PyMISPError as e:
-        logger.error(f"Error fetching IoCs: {e}")
-    return []
+    
+    # Start the current page at 1
+    c_page = 1
+    
+    # Only retrieve 500 attributes per page
+    PAGE_LIMIT = 500
+    while True:    
+        try:
+            logger.info(f"Searching MISP attributes for tags: {tag} with limit={PAGE_LIMIT}. Current Page: {c_page}")
+            # Initiates a search on the pymisp instance for the tag(s). If multiple
+            # tags are present, it will get all events that contain any of the
+            # indiviudal tags specified (OR operation). 
+            # Paginates the results into 500 attributes per page. 
+            results = pymisp_instance.search(controller="attributes",
+                    tags=tag,
+                    limit=PAGE_LIMIT,
+                    page=c_page)
 
+            attributes = results.get('Attribute', [])
+            
+            # Exit the loop if there is no more attributes to grab
+            if not attributes:
+                break
+            
+            # Loop through each attribute found in the current batch
+            for attr in attributes:
+                # Ensure that the IDS flag has been checked, and that the type is mapable to defender. 
+                if (
+                    attr["type"] in defender_map.keys()
+                    and attr["to_ids"]):
+                        # Stream the results back to the calling function
+                        yield {
+                            "indicatorType": defender_map[attr["type"]],
+                            "indicatorValue": attr.get("value"),
+                            "action": "Block",
+                            "title": f"IoC from MISP Event {attr['event_id']}",
+                            "description": f"IoC from MISP Event {attr['event_id']}",
+                        }
+                        
+            # Move to the next page of results.  
+            c_page += 1
+                        
+        except Exception as e:
+            logger.error("An error occurring when searching through MISP: {e}")
+            break
 
 def GetMSAuthToken(tenant_id, client_id, client_secret, logger):
     # Requests an OAuth token needed for pushing IoCs into the Defender API.
@@ -91,28 +119,52 @@ def GetMSAuthToken(tenant_id, client_id, client_secret, logger):
     return response.json().get("access_token")
 
 
-def PushIOCsToDefender(auth_token, iocs, logger):
+def PushIOCsToDefender(auth_token, ioc_generator_obj, logger):
     # Pushes each individual IoC into the specified Defender instance, and
     # sets to block.
     headers = {
         "Authorization": f"Bearer {auth_token}",
         "Content-Type": "application/json",
     }
+    
+    url = "https://api.securitycenter.microsoft.com/api/indicators/import"
+    
+    total_iocs_pushed = 0
+    batch = []
+    # Loops through the ioc generator object and pushes indicators into defender in batches of 500 (API has a limit of 500 indicators per request). 
+    for i, ioc_obj in enumerate(ioc_generator_obj, start=1):
+        # Add IoC to current batch as we receive it from the ioc generator object
+        batch.append(ioc_obj)
+    
+        # Check if the batch is ready to be sent off, and then fire it into defender. 
+        if len(batch) == 500:
+            try:
+                response = requests.post(url, headers=headers, data=json.dumps({"Indicators": batch}))
+                if response.status_code == 200:
+                    logger.info(f"Successfully pushed 500 Indicators to Defender in Batch:  {i // 500}")
+                else:
+                    logger.info(f"Error pushing batch {i // 500}: {response.text}")
+            except Exception as e:
+                logger.info(f"Error pushing IOCs to  Defender {e}")
+            # Keep track of how many IoCs have been pushed.
+            total_iocs_pushed+=500
+            # Clear the batch to make way to send the next 500. 
+            batch.clear()
+        
+    # Push remaining IoCs for the last batch that don't quite meet the len(batch) 500 limit. 
+    if batch:
+        try:
+            response = requests.post(url, headers=headers, data=json.dumps({"Indicators": batch}))
+            if response.status_code == 200:
+                logger.info(f"Successfully pushed 500 Indicators to Defender in Batch: {i // 500}")
+            else:
+                logger.info(f"Error pushing batch {i // 500}: {response.text}")
+        except Exception as e:
+            logger.info(f"Error pushing IOCs to Defender {e}")
 
-    url = "https://api.securitycenter.microsoft.com/api/indicators"
-
-    for ioc in iocs:
-        response = requests.post(url, headers=headers, json=ioc)
-        if response.status_code == 200:
-            logger.info(
-                f"Sent IoC {ioc['indicatorType']} {
-                    ioc['indicatorValue']} successfully into Defender")
-        else:
-            logger.error(
-                f"Failed to add IoC {
-                    ioc['indicatorValue']}: {
-                    response.status_code}, {
-                    response.text}")
+    total_iocs_pushed+=len(batch)
+        
+    logger.info(f"Total IoCs Pushed Into Defender: {total_iocs_pushed}")
 
 
 def ConfigureLogging(log_file="misp_to_defender.log"):
@@ -181,25 +233,11 @@ def Main():
 
     # Check to make sure VerifyTLS is either True or False. PyMISP only
     # accepts bool type, so must convert from str input.
-    if verify_tls.strip().lower() == "true":
-        verify_tls = True
-    elif verify_tls.strip().lower() == "false":
-        verify_tls = False
-    else:
+    try:
+        verify_tls = config.getboolean("MISP", "VerifyTLS")
+    except ValueError:
         logger.error(
-            "VerifyTLS variable in configuration file should be either True or False.")
-        exit(1)
-
-    misp_conn = EstablishMISPConn(
-        base_url, auth_key, verify_tls, logger=logger)
-    iocs = GetIOCsFromMISP(misp_conn, tags, logger=logger)
-
-    # Checks that there is actually valid IoCs that were extracted before
-    # pushing to Defender.
-    if not iocs:
-        print(
-            "Unable to find any compatible IoCs. Try changing the search tag and try again."
-        )
+            "VerifyTLS variable in configuration file should be either 'true', 'false', 'yes', 'no', '1', or '0'.")
         exit(1)
 
     # Obtains config data for Defender instance.
@@ -228,9 +266,15 @@ def Main():
         client_id,
         client_secret,
         logger=logger)
+
+    misp_conn = EstablishMISPConn(
+        base_url, auth_key, verify_tls, logger=logger)
+        
+    # Fetch IoCs from MISP in pages, then stream to Defender.
+    ioc_generator_obj = GetIOCsFromMISP(misp_conn, tags, logger=logger)
     
     # Pushes out all the extracted IoCs into the Defender instance.
-    PushIOCsToDefender(oauth_token, iocs, logger=logger)
+    PushIOCsToDefender(oauth_token, ioc_generator_obj, logger=logger)
 
 
 if __name__ == "__main__":
