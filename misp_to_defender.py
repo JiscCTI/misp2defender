@@ -15,6 +15,7 @@ from configparser import ConfigParser, NoSectionError, NoOptionError
 import logging
 import os
 import json
+import time
 
 try:
     from pymisp import PyMISP
@@ -165,6 +166,9 @@ def PushIOCsToDefender(auth_token, ioc_generator_obj, logger):
             # Clear the batch to make way to send the next 500.
             batch.clear()
 
+            # Time rate limiting restriction of Microsoft API
+            time.sleep(2)
+
     # Push remaining IoCs for the last batch that don't quite meet the
     # len(batch) 500 limit.
     if batch:
@@ -183,6 +187,10 @@ def PushIOCsToDefender(auth_token, ioc_generator_obj, logger):
     total_iocs_pushed += len(batch)
 
     logger.info(f"Total IoCs Pushed Into Defender: {total_iocs_pushed}")
+
+    if total_iocs_pushed == 0:
+        logger.info(
+            f"Make sure your configured tag has valid MISP attributes associated to it.")
 
 
 def ConfigureLogging(log_file="misp_to_defender.log"):
@@ -212,6 +220,46 @@ def ConfigureLogging(log_file="misp_to_defender.log"):
     logging.getLogger("pymisp").setLevel(logging.CRITICAL)
 
     return logger
+
+# Testing function to clear out Microsoft Defender of all indicators.
+# (WARNING!!)
+
+
+def DeleteAllIndicators(auth_token):
+    headers = {
+        "Authorization": f"Bearer {auth_token}",
+        "Content-Type": "application/json"
+    }
+
+    # Fetch the first batch of indicators (up to 500 at a time)
+    params = {
+        "limit": 500
+    }
+
+    # Generate numbers from 1 to 15,000
+    all_indicators = list(range(1, 15001))
+
+    # Split into batches of 500
+    batch_size = 500
+    batches = [all_indicators[i:i + batch_size]
+               for i in range(0, len(all_indicators), batch_size)]
+
+    for batch_num, batch in enumerate(batches, start=1):
+        # MS Takes the ID as string
+        delete_data = {
+            "IndicatorIds": [str(num) for num in batch]
+        }
+
+        delete_response = requests.post(
+            "https://api.securitycenter.microsoft.com/api/indicators/BatchDelete",
+            headers=headers,
+            json=delete_data)
+
+        if delete_response.status_code == 200:
+            print(f"Successfully deleted indicators.")
+
+        # time rate limited api
+        time.sleep(2)
 
 
 def Main():
@@ -287,6 +335,9 @@ def Main():
 
     misp_conn = EstablishMISPConn(
         base_url, auth_key, verify_tls, logger=logger)
+
+    # TESTING ONLY - DELETE ALL INDICATORS FROM TENANCY. USE AT OWN RISK.
+    # DeleteAllIndicators(oauth_token)
 
     # Fetch IoCs from MISP in pages, then stream to Defender.
     ioc_generator_obj = GetIOCsFromMISP(misp_conn, tags, logger=logger)
